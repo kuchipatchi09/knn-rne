@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+const s=Math.sin(dlat/2)**2+Math.cos(toRad(lat1))*Math.cos(toRad(lat2))*Math.sin(dlon/2)**2;
+return 2*R*Math.asin(Math.sqrt(s));
+}
+function findStartIndexByCoord(coordsLatLon, targetLatLon, tolMeters=10){
+const d = coordsLatLon.map((p,i)=>[haversine(p,targetLatLon),i]).sort((a,b)=>a[0]-b[0]);
+return d[0][0] <= tolMeters ? d[0][1] : null;
+}
+
+
+// ========= ORS =========
+async function orsGeocode(apiKey, text){
+const url=new URL('https://api.openrouteservice.org/geocode/search');
+url.searchParams.set('api_key', apiKey); url.searchParams.set('text', text); url.searchParams.set('size','1');
+const r=await fetch(url,{headers:{'Accept':'application/json'}}); if(!r.ok) throw new Error(`Geocode 실패: ${r.status}`);
+const j=await r.json(); const f=j.features?.[0]; if(!f) throw new Error('지오코드 결과 없음');
+const [lon,lat]=f.geometry.coordinates; return [lat,lon];
+}
+async function orsMatrix(apiKey, profile, coordsLonLat){
+const r=await fetch(`https://api.openrouteservice.org/v2/matrix/${profile}`,{
+method:'POST', headers:{'Authorization':apiKey,'Content-Type':'application/json'},
+body:JSON.stringify({locations:coordsLonLat, metrics:['distance'], resolve_locations:true})
+}); if(!r.ok) throw new Error(`Matrix 실패: ${r.status}`); return (await r.json()).distances;
+}
+async function orsDirections(apiKey, profile, aLonLat, bLonLat){
+const r=await fetch(`https://api.openrouteservice.org/v2/directions/${profile}/geojson`,{
+method:'POST', headers:{'Authorization':apiKey,'Content-Type':'application/json'},
+body:JSON.stringify({coordinates:[aLonLat,bLonLat]})
+}); if(!r.ok) throw new Error(`Directions 실패: ${r.status}`); return await r.json();
+}
+
+
+// ========= Heuristics =========
+function nearestNeighborOpen(M, start=0){
+const n=M.length, visited=Array(n).fill(false); const route=[start]; visited[start]=true; let cur=start;
+for(let step=0; step<n-1; step++){
+let best=-1, bestD=Infinity; for(let j=0;j<n;j++){ if(!visited[j] && j!==cur){ const d=M[cur][j]; if(d<bestD){bestD=d; best=j;} } }
+route.push(best); visited[best]=true; cur=best;
+} return route;
+}
+function twoOptOpen(route,M,fixStart=true){
+const n=route.length; const pathLen=r=>r.slice(0,-1).reduce((a,_,i)=>a+M[r[i]][r[i+1]],0);
+let best=route.slice(), bestLen=pathLen(best), improved=true, startI=fixStart?1:0;
+while(improved){ improved=false; for(let i=startI;i<n-2;i++){ for(let k=i+1;k<n-1;k++){ const nr=best.slice(0,i).concat(best.slice(i,k+1).reverse(),best.slice(k+1)); const nl=pathLen(nr); if(nl+1e-9<bestLen){best=nr; bestLen=nl; improved=true;} } } }
+return {route:best, meters:bestLen};
+}
+
+
+// ========= Map =========
+let map=L.map('map',{zoomControl:true}).setView(COORDS_LATLON[0],14);
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:20, attribution:'&copy; OpenStreetMap'}).addTo(map);
+const drawnLayer=L.layerGroup().addTo(map);
+function clearMap(){ drawnLayer.clearLayers(); }
+function drawMarkers(coordsLatLon, labels, route){
+route.forEach((idx, order)=>{ const [lat,lon]=coordsLatLon[idx]; const m=L.marker([lat,lon]).addTo(drawnLayer); m.bindPopup(`${order+1}번째: ${labels[idx]}`).openPopup(); const el=document.createElement('div'); el.className='num-label'; el.textContent=String(order+1); L.marker([lat,lon],{icon:L.divIcon({className:'', html:el, iconSize:[24,16]})}).addTo(drawnLayer); });
+const s=route[0], e=route[route.length-1]; L.circleMarker(COORDS_LATLON[s],{radius:8,color:'#22c55e'}).addTo(drawnLayer).bindTooltip('출발지'); L.circleMarker(COORDS_LATLON[e],{radius:8,color:'#ef4444'}).addTo(drawnLayer).bindTooltip('도착지');
+}
+async function drawDirections(apiKey, profile, coordsLonLat, route){
+for(let i=0;i<route.length-1;i++){ const a=coordsLonLat[route[i]], b=coordsLonLat[route[i+1]]; try{ const gj=await orsDirections(apiKey,profile,a,b); const coords=gj.features[0].geometry.coordinates.map(([lon,lat])=>[lat,lon]); const line=L.polyline(coords,{weight:4}).addTo(drawnLayer); L.polylineDecorator(line,{patterns:[{offset:7, repeat:40, symbol:L.Symbol.arrowHead({pixelSize:10, pathOptions:{weight:2}})}]}).addTo(drawnLayer); }catch(e){ console.warn(`[경고] 도로 경로 그리기 실패 #${i}:`,e); } }
+}
+function fillTable(route, labels, coordsLatLon){ const tbody=document.querySelector('#resultTable tbody'); tbody.innerHTML=''; route.forEach((idx,i)=>{ const tr=document.createElement('tr'); const [lat,lon]=coordsLatLon[idx]; tr.innerHTML=`<td>${i+1}</td><td>${labels[idx]}</td><td>${lat.toFixed(6)}</td><td>${lon.toFixed(6)}</td>`; tbody.appendChild(tr); }); }
+function showStats(km,n,secs){ $("#stats").innerHTML=`총 노드: <b>${n}</b><br/>총 경로 거리(도로): <b>${km.toFixed(2)} km</b><br/>소요시간: <b>${secs.toFixed(2)} s</b>`; }
+
+
+// ========= Main =========
+$("#clearBtn").addEventListener('click',()=>{ clearMap(); $("#stats").textContent=''; $("#resultTable tbody").innerHTML=''; setStatus('Cleared'); });
+$("#runBtn").addEventListener('click', async ()=>{
+try{
+setStatus('Preparing...'); clearMap();
+const apiKey=$("#apiKey").value.trim(); if(!apiKey) throw new Error('ORS API Key를 입력하세요.');
+const profile=$("#profile").value; const zoom=parseInt($("#zoomStart").value)||14;
+// start detection
+let startIdx=parseInt($("#startIndex").value)||0; const startText=$("#startInput").value.trim(); const tolM=parseFloat($("#tolMeters").value)||10;
+let startLatLon=null; if(startText){ const m=startText.split(/[ ,]+/); if(m.length>=2 && !isNaN(parseFloat(m[0])) && !isNaN(parseFloat(m[1]))){ startLatLon=[parseFloat(m[0]),parseFloat(m[1])]; } else { startLatLon=await orsGeocode(apiKey,startText); } const idx=findStartIndexByCoord(COORDS_LATLON,startLatLon,tolM); if(idx!==null) startIdx=idx; }
+map.setView(startLatLon ?? COORDS_LATLON[startIdx], zoom);
+setStatus('Building distance matrix...'); const coordsLonLat=ensureLonLat(COORDS_LATLON); const distM=await orsMatrix(apiKey,profile,coordsLonLat);
+setStatus('Nearest neighbor...'); const rough=nearestNeighborOpen(distM,startIdx);
+setStatus('2-opt refining...'); const t0=performance.now(); const {route, meters}=twoOptOpen(rough,distM,true); const t1=performance.now();
+setStatus('Drawing markers...'); drawMarkers(COORDS_LATLON, LABELS, route);
+setStatus('Drawing directions...'); await drawDirections(apiKey,profile,coordsLonLat,route);
+const km=meters/1000.0; fillTable(route, LABELS, COORDS_LATLON); showStats(km, COORDS_LATLON.length, (t1-t0)/1000); setStatus('Done');
+}catch(err){ console.error(err); setStatus('Error'); alert(err.message||String(err)); }
+});
+</script>
+</body>
+</html>
