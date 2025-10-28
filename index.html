@@ -1,86 +1,224 @@
 <!DOCTYPE html>
-const s=Math.sin(dlat/2)**2+Math.cos(toRad(lat1))*Math.cos(toRad(lat2))*Math.sin(dlon/2)**2;
-return 2*R*Math.asin(Math.sqrt(s));
-}
-function findStartIndexByCoord(coordsLatLon, targetLatLon, tolMeters=10){
-const d = coordsLatLon.map((p,i)=>[haversine(p,targetLatLon),i]).sort((a,b)=>a[0]-b[0]);
-return d[0][0] <= tolMeters ? d[0][1] : null;
-}
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Open-Path Route Optimizer (Fixed Points)</title>
+  <!-- Leaflet -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="" />
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+  <script src="https://unpkg.com/leaflet-polylinedecorator@1.7.0/dist/leaflet.polylineDecorator.min.js"></script>
+  <style>
+    :root { --bg:#0b1220; --card:#0f172a; --ink:#e5e7eb; --muted:#9ca3af; --accent:#60a5fa; }
+    body { margin:0; background:var(--bg); color:var(--ink); font-family:ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,Noto Sans,Ubuntu,Cantarell,Helvetica Neue,Arial; }
+    header { padding:16px 20px; border-bottom:1px solid #1f2937; display:flex; justify-content:space-between; align-items:center; }
+    header h1 { margin:0; font-size:18px; font-weight:700; }
+    .container { display:grid; grid-template-columns:360px 1fr; height:calc(100vh - 58px); }
+    .panel { background:var(--card); border-right:1px solid #1f2937; overflow:auto; }
+    .panel section { padding:16px; border-bottom:1px solid #1f2937; }
+    .panel h2 { font-size:13px; margin:0 0 8px; color:var(--muted); text-transform:uppercase; letter-spacing:.08em; }
+    label { font-size:12px; color:var(--muted); display:block; margin:8px 0 4px; }
+    input[type="text"], select { width:100%; box-sizing:border-box; padding:10px 12px; border-radius:10px; border:1px solid #374151; background:#0b1220; color:var(--ink); }
+    .row { display:flex; gap:8px; }
+    .btn { display:inline-flex; align-items:center; gap:8px; background:linear-gradient(180deg,#1f2937,#0b1220); color:#fff; border:1px solid #374151; padding:10px 12px; border-radius:12px; cursor:pointer; font-weight:600; }
+    .btn:disabled { opacity:.5; cursor:not-allowed; }
+    .hint { font-size:12px; color:var(--muted); margin-top:6px; }
+    .stats { font-size:13px; line-height:1.4; }
+    .table { width:100%; border-collapse:collapse; font-size:12px; }
+    .table th,.table td { padding:6px 8px; border-bottom:1px solid #1f2937; text-align:left; }
+    .pill { display:inline-flex; align-items:center; gap:6px; padding:4px 8px; border-radius:999px; background:#0b1220; border:1px solid #374151; font-size:11px; color:#cbd5e1; }
+    #map { height:calc(100vh - 58px); width:100%; }
+    .num-label { background:#ef4444; color:#fff; border-radius:8px; padding:2px 6px; font-size:11px; border:1px solid rgba(0,0,0,.25); }
+    .footer { font-size:11px; color:#94a3b8; }
+    code { background:#111827; border:1px solid #374151; padding:2px 6px; border-radius:6px; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Open-Path Route Optimizer — Fixed Coordinates</h1>
+    <div class="pill" id="statusPill">Idle</div>
+  </header>
+  <div class="container">
+    <div class="panel">
+      <section>
+        <h2>Config</h2>
+        <label>ORS API Key</label>
+        <input id="apiKey" type="text" placeholder="YOUR_ORS_API_KEY" />
+        <div class="row" style="margin-top:10px;">
+          <div style="flex:1">
+            <label>Profile</label>
+            <select id="profile">
+              <option value="driving-car" selected>driving-car</option>
+              <option value="foot-walking">foot-walking</option>
+              <option value="cycling-regular">cycling-regular</option>
+            </select>
+          </div>
+          <div style="width:120px">
+            <label>Zoom</label>
+            <input id="zoomStart" type="text" value="14" />
+          </div>
+        </div>
+      </section>
 
+      <section>
+        <h2>Start</h2>
+        <label>출발지(주소 또는 "위도,경도")</label>
+        <input id="startInput" type="text" placeholder="예: 천안아산역 또는 36.813652,127.108917" />
+        <div class="row" style="margin-top:8px;">
+          <div style="flex:1">
+            <label>시작 인덱스(백업)</label>
+            <input id="startIndex" type="text" value="0" />
+          </div>
+          <div style="flex:1">
+            <label>좌표 일치 허용 오차(m)</label>
+            <input id="tolMeters" type="text" value="10" />
+          </div>
+        </div>
+        <div class="hint">⚠️ 이 사이트는 <b>고정된 좌표 목록</b>만 사용합니다. 사용자가 입력할 수 있는 값은 출발지 뿐입니다.</div>
+      </section>
 
-// ========= ORS =========
-async function orsGeocode(apiKey, text){
-const url=new URL('https://api.openrouteservice.org/geocode/search');
-url.searchParams.set('api_key', apiKey); url.searchParams.set('text', text); url.searchParams.set('size','1');
-const r=await fetch(url,{headers:{'Accept':'application/json'}}); if(!r.ok) throw new Error(`Geocode 실패: ${r.status}`);
-const j=await r.json(); const f=j.features?.[0]; if(!f) throw new Error('지오코드 결과 없음');
-const [lon,lat]=f.geometry.coordinates; return [lat,lon];
-}
-async function orsMatrix(apiKey, profile, coordsLonLat){
-const r=await fetch(`https://api.openrouteservice.org/v2/matrix/${profile}`,{
-method:'POST', headers:{'Authorization':apiKey,'Content-Type':'application/json'},
-body:JSON.stringify({locations:coordsLonLat, metrics:['distance'], resolve_locations:true})
-}); if(!r.ok) throw new Error(`Matrix 실패: ${r.status}`); return (await r.json()).distances;
-}
-async function orsDirections(apiKey, profile, aLonLat, bLonLat){
-const r=await fetch(`https://api.openrouteservice.org/v2/directions/${profile}/geojson`,{
-method:'POST', headers:{'Authorization':apiKey,'Content-Type':'application/json'},
-body:JSON.stringify({coordinates:[aLonLat,bLonLat]})
-}); if(!r.ok) throw new Error(`Directions 실패: ${r.status}`); return await r.json();
-}
+      <section>
+        <h2>Fixed Points</h2>
+        <div class="hint">아래 좌표들이 하드코딩되어 경로 최적화에 사용됩니다.</div>
+        <table class="table" id="fixedTable">
+          <thead><tr><th>#</th><th>Lat</th><th>Lon</th></tr></thead>
+          <tbody></tbody>
+        </table>
+        <div class="row" style="margin-top:10px; gap:12px;">
+          <button class="btn" id="runBtn">최단 오픈 경로 계산 · 그리기</button>
+          <button class="btn" id="clearBtn">지도 초기화</button>
+        </div>
+      </section>
 
+      <section>
+        <h2>Results</h2>
+        <div class="stats" id="stats"></div>
+        <div style="margin-top:12px;">
+          <table class="table" id="resultTable">
+            <thead><tr><th>#</th><th>Label</th><th>Lat</th><th>Lon</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+        <div class="footer" style="margin-top:8px;">Made with ORS Matrix/Directions + Leaflet. 오픈 경로(복귀 없음), 최근접이웃 → 2-opt.</div>
+      </section>
+    </div>
+    <div id="map"></div>
+  </div>
 
-// ========= Heuristics =========
-function nearestNeighborOpen(M, start=0){
-const n=M.length, visited=Array(n).fill(false); const route=[start]; visited[start]=true; let cur=start;
-for(let step=0; step<n-1; step++){
-let best=-1, bestD=Infinity; for(let j=0;j<n;j++){ if(!visited[j] && j!==cur){ const d=M[cur][j]; if(d<bestD){bestD=d; best=j;} } }
-route.push(best); visited[best]=true; cur=best;
-} return route;
-}
-function twoOptOpen(route,M,fixStart=true){
-const n=route.length; const pathLen=r=>r.slice(0,-1).reduce((a,_,i)=>a+M[r[i]][r[i+1]],0);
-let best=route.slice(), bestLen=pathLen(best), improved=true, startI=fixStart?1:0;
-while(improved){ improved=false; for(let i=startI;i<n-2;i++){ for(let k=i+1;k<n-1;k++){ const nr=best.slice(0,i).concat(best.slice(i,k+1).reverse(),best.slice(k+1)); const nl=pathLen(nr); if(nl+1e-9<bestLen){best=nr; bestLen=nl; improved=true;} } } }
-return {route:best, meters:bestLen};
-}
+  <script>
+    // ========= Fixed coordinates =========
+    const COORDS_LATLON = [
+      [36.813652,127.108917],
+      [36.816426,127.100297],
+      [36.820348,127.101548],
+      [36.827994,127.124864],
+      [36.829748,127.123632],
+      [36.832884,127.123641],
+      [36.836924,127.129845],
+      [36.839294,127.133442],
+      [36.841649,127.127153],
+      [36.835261,127.151048]
+    ];
+    const LABELS = Array.from({length: COORDS_LATLON.length}, (_,i)=>`Point ${i+1}`);
 
+    // ========= DOM helpers =========
+    const $ = (sel) => document.querySelector(sel);
+    const setStatus = (msg) => ($("#statusPill").textContent = msg);
 
-// ========= Map =========
-let map=L.map('map',{zoomControl:true}).setView(COORDS_LATLON[0],14);
-L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:20, attribution:'&copy; OpenStreetMap'}).addTo(map);
-const drawnLayer=L.layerGroup().addTo(map);
-function clearMap(){ drawnLayer.clearLayers(); }
-function drawMarkers(coordsLatLon, labels, route){
-route.forEach((idx, order)=>{ const [lat,lon]=coordsLatLon[idx]; const m=L.marker([lat,lon]).addTo(drawnLayer); m.bindPopup(`${order+1}번째: ${labels[idx]}`).openPopup(); const el=document.createElement('div'); el.className='num-label'; el.textContent=String(order+1); L.marker([lat,lon],{icon:L.divIcon({className:'', html:el, iconSize:[24,16]})}).addTo(drawnLayer); });
-const s=route[0], e=route[route.length-1]; L.circleMarker(COORDS_LATLON[s],{radius:8,color:'#22c55e'}).addTo(drawnLayer).bindTooltip('출발지'); L.circleMarker(COORDS_LATLON[e],{radius:8,color:'#ef4444'}).addTo(drawnLayer).bindTooltip('도착지');
-}
-async function drawDirections(apiKey, profile, coordsLonLat, route){
-for(let i=0;i<route.length-1;i++){ const a=coordsLonLat[route[i]], b=coordsLonLat[route[i+1]]; try{ const gj=await orsDirections(apiKey,profile,a,b); const coords=gj.features[0].geometry.coordinates.map(([lon,lat])=>[lat,lon]); const line=L.polyline(coords,{weight:4}).addTo(drawnLayer); L.polylineDecorator(line,{patterns:[{offset:7, repeat:40, symbol:L.Symbol.arrowHead({pixelSize:10, pathOptions:{weight:2}})}]}).addTo(drawnLayer); }catch(e){ console.warn(`[경고] 도로 경로 그리기 실패 #${i}:`,e); } }
-}
-function fillTable(route, labels, coordsLatLon){ const tbody=document.querySelector('#resultTable tbody'); tbody.innerHTML=''; route.forEach((idx,i)=>{ const tr=document.createElement('tr'); const [lat,lon]=coordsLatLon[idx]; tr.innerHTML=`<td>${i+1}</td><td>${labels[idx]}</td><td>${lat.toFixed(6)}</td><td>${lon.toFixed(6)}</td>`; tbody.appendChild(tr); }); }
-function showStats(km,n,secs){ $("#stats").innerHTML=`총 노드: <b>${n}</b><br/>총 경로 거리(도로): <b>${km.toFixed(2)} km</b><br/>소요시간: <b>${secs.toFixed(2)} s</b>`; }
+    // Populate fixed table
+    (function fillFixed(){
+      const tbody = $("#fixedTable tbody");
+      tbody.innerHTML = '';
+      COORDS_LATLON.forEach(([lat,lon],i)=>{
+        const tr = document.createElement('tr');
+        tr.innerHTML = `<td>${i+1}</td><td>${lat}</td><td>${lon}</td>`;
+        tbody.appendChild(tr);
+      });
+    })();
 
+    // ========= Utils =========
+    function ensureLonLat(latlon){ return latlon.map(([lat,lon])=>[lon,lat]); }
+    function haversine(a,b){
+      const R=6371000, toRad=d=>d*Math.PI/180; const [lat1,lon1]=a,[lat2,lon2]=b;
+      const dlat=toRad(lat2-lat1), dlon=toRad(lon2-lon1);
+      const s=Math.sin(dlat/2)**2+Math.cos(toRad(lat1))*Math.cos(toRad(lat2))*Math.sin(dlon/2)**2;
+      return 2*R*Math.asin(Math.sqrt(s));
+    }
+    function findStartIndexByCoord(coordsLatLon, targetLatLon, tolMeters=10){
+      const d = coordsLatLon.map((p,i)=>[haversine(p,targetLatLon),i]).sort((a,b)=>a[0]-b[0]);
+      return d[0][0] <= tolMeters ? d[0][1] : null;
+    }
 
-// ========= Main =========
-$("#clearBtn").addEventListener('click',()=>{ clearMap(); $("#stats").textContent=''; $("#resultTable tbody").innerHTML=''; setStatus('Cleared'); });
-$("#runBtn").addEventListener('click', async ()=>{
-try{
-setStatus('Preparing...'); clearMap();
-const apiKey=$("#apiKey").value.trim(); if(!apiKey) throw new Error('ORS API Key를 입력하세요.');
-const profile=$("#profile").value; const zoom=parseInt($("#zoomStart").value)||14;
-// start detection
-let startIdx=parseInt($("#startIndex").value)||0; const startText=$("#startInput").value.trim(); const tolM=parseFloat($("#tolMeters").value)||10;
-let startLatLon=null; if(startText){ const m=startText.split(/[ ,]+/); if(m.length>=2 && !isNaN(parseFloat(m[0])) && !isNaN(parseFloat(m[1]))){ startLatLon=[parseFloat(m[0]),parseFloat(m[1])]; } else { startLatLon=await orsGeocode(apiKey,startText); } const idx=findStartIndexByCoord(COORDS_LATLON,startLatLon,tolM); if(idx!==null) startIdx=idx; }
-map.setView(startLatLon ?? COORDS_LATLON[startIdx], zoom);
-setStatus('Building distance matrix...'); const coordsLonLat=ensureLonLat(COORDS_LATLON); const distM=await orsMatrix(apiKey,profile,coordsLonLat);
-setStatus('Nearest neighbor...'); const rough=nearestNeighborOpen(distM,startIdx);
-setStatus('2-opt refining...'); const t0=performance.now(); const {route, meters}=twoOptOpen(rough,distM,true); const t1=performance.now();
-setStatus('Drawing markers...'); drawMarkers(COORDS_LATLON, LABELS, route);
-setStatus('Drawing directions...'); await drawDirections(apiKey,profile,coordsLonLat,route);
-const km=meters/1000.0; fillTable(route, LABELS, COORDS_LATLON); showStats(km, COORDS_LATLON.length, (t1-t0)/1000); setStatus('Done');
-}catch(err){ console.error(err); setStatus('Error'); alert(err.message||String(err)); }
-});
-</script>
+    // ========= ORS =========
+    async function orsGeocode(apiKey, text){
+      const url=new URL('https://api.openrouteservice.org/geocode/search');
+      url.searchParams.set('api_key', apiKey); url.searchParams.set('text', text); url.searchParams.set('size','1');
+      const r=await fetch(url,{headers:{'Accept':'application/json'}}); if(!r.ok) throw new Error(`Geocode 실패: ${r.status}`);
+      const j=await r.json(); const f=j.features?.[0]; if(!f) throw new Error('지오코드 결과 없음');
+      const [lon,lat]=f.geometry.coordinates; return [lat,lon];
+    }
+    async function orsMatrix(apiKey, profile, coordsLonLat){
+      const r=await fetch(`https://api.openrouteservice.org/v2/matrix/${profile}`,{
+        method:'POST', headers:{'Authorization':apiKey,'Content-Type':'application/json'},
+        body:JSON.stringify({locations:coordsLonLat, metrics:['distance'], resolve_locations:true})
+      }); if(!r.ok) throw new Error(`Matrix 실패: ${r.status}`); return (await r.json()).distances;
+    }
+    async function orsDirections(apiKey, profile, aLonLat, bLonLat){
+      const r=await fetch(`https://api.openrouteservice.org/v2/directions/${profile}/geojson`,{
+        method:'POST', headers:{'Authorization':apiKey,'Content-Type':'application/json'},
+        body:JSON.stringify({coordinates:[aLonLat,bLonLat]})
+      }); if(!r.ok) throw new Error(`Directions 실패: ${r.status}`); return await r.json();
+    }
+
+    // ========= Heuristics =========
+    function nearestNeighborOpen(M, start=0){
+      const n=M.length, visited=Array(n).fill(false); const route=[start]; visited[start]=true; let cur=start;
+      for(let step=0; step<n-1; step++){
+        let best=-1, bestD=Infinity; for(let j=0;j<n;j++){ if(!visited[j] && j!==cur){ const d=M[cur][j]; if(d<bestD){bestD=d; best=j;} } }
+        route.push(best); visited[best]=true; cur=best;
+      } return route;
+    }
+    function twoOptOpen(route,M,fixStart=true){
+      const n=route.length; const pathLen=r=>r.slice(0,-1).reduce((a,_,i)=>a+M[r[i]][r[i+1]],0);
+      let best=route.slice(), bestLen=pathLen(best), improved=true, startI=fixStart?1:0;
+      while(improved){ improved=false; for(let i=startI;i<n-2;i++){ for(let k=i+1;k<n-1;k++){ const nr=best.slice(0,i).concat(best.slice(i,k+1).reverse(),best.slice(k+1)); const nl=pathLen(nr); if(nl+1e-9<bestLen){best=nr; bestLen=nl; improved=true;} } } }
+      return {route:best, meters:bestLen};
+    }
+
+    // ========= Map =========
+    let map=L.map('map',{zoomControl:true}).setView(COORDS_LATLON[0],14);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:20, attribution:'&copy; OpenStreetMap'}).addTo(map);
+    const drawnLayer=L.layerGroup().addTo(map);
+    function clearMap(){ drawnLayer.clearLayers(); }
+    function drawMarkers(coordsLatLon, labels, route){
+      route.forEach((idx, order)=>{ const [lat,lon]=coordsLatLon[idx]; const m=L.marker([lat,lon]).addTo(drawnLayer); m.bindPopup(`${order+1}번째: ${labels[idx]}`).openPopup(); const el=document.createElement('div'); el.className='num-label'; el.textContent=String(order+1); L.marker([lat,lon],{icon:L.divIcon({className:'', html:el, iconSize:[24,16]})}).addTo(drawnLayer); });
+      const s=route[0], e=route[route.length-1]; L.circleMarker(COORDS_LATLON[s],{radius:8,color:'#22c55e'}).addTo(drawnLayer).bindTooltip('출발지'); L.circleMarker(COORDS_LATLON[e],{radius:8,color:'#ef4444'}).addTo(drawnLayer).bindTooltip('도착지');
+    }
+    async function drawDirections(apiKey, profile, coordsLonLat, route){
+      for(let i=0;i<route.length-1;i++){ const a=coordsLonLat[route[i]], b=coordsLonLat[route[i+1]]; try{ const gj=await orsDirections(apiKey,profile,a,b); const coords=gj.features[0].geometry.coordinates.map(([lon,lat])=>[lat,lon]); const line=L.polyline(coords,{weight:4}).addTo(drawnLayer); L.polylineDecorator(line,{patterns:[{offset:7, repeat:40, symbol:L.Symbol.arrowHead({pixelSize:10, pathOptions:{weight:2}})}]}).addTo(drawnLayer); }catch(e){ console.warn(`[경고] 도로 경로 그리기 실패 #${i}:`,e); } }
+    }
+    function fillTable(route, labels, coordsLatLon){ const tbody=document.querySelector('#resultTable tbody'); tbody.innerHTML=''; route.forEach((idx,i)=>{ const tr=document.createElement('tr'); const [lat,lon]=coordsLatLon[idx]; tr.innerHTML=`<td>${i+1}</td><td>${labels[idx]}</td><td>${lat.toFixed(6)}</td><td>${lon.toFixed(6)}</td>`; tbody.appendChild(tr); }); }
+    function showStats(km,n,secs){ $("#stats").innerHTML=`총 노드: <b>${n}</b><br/>총 경로 거리(도로): <b>${km.toFixed(2)} km</b><br/>소요시간: <b>${secs.toFixed(2)} s</b>`; }
+
+    // ========= Main =========
+    $("#clearBtn").addEventListener('click',()=>{ clearMap(); $("#stats").textContent=''; $("#resultTable tbody").innerHTML=''; setStatus('Cleared'); });
+    $("#runBtn").addEventListener('click', async ()=>{
+      try{
+        setStatus('Preparing...'); clearMap();
+        const apiKey=$("#apiKey").value.trim(); if(!apiKey) throw new Error('ORS API Key를 입력하세요.');
+        const profile=$("#profile").value; const zoom=parseInt($("#zoomStart").value)||14;
+        // start detection
+        let startIdx=parseInt($("#startIndex").value)||0; const startText=$("#startInput").value.trim(); const tolM=parseFloat($("#tolMeters").value)||10;
+        let startLatLon=null; if(startText){ const m=startText.split(/[ ,]+/); if(m.length>=2 && !isNaN(parseFloat(m[0])) && !isNaN(parseFloat(m[1]))){ startLatLon=[parseFloat(m[0]),parseFloat(m[1])]; } else { startLatLon=await orsGeocode(apiKey,startText); } const idx=findStartIndexByCoord(COORDS_LATLON,startLatLon,tolM); if(idx!==null) startIdx=idx; }
+        map.setView(startLatLon ?? COORDS_LATLON[startIdx], zoom);
+        setStatus('Building distance matrix...'); const coordsLonLat=ensureLonLat(COORDS_LATLON); const distM=await orsMatrix(apiKey,profile,coordsLonLat);
+        setStatus('Nearest neighbor...'); const rough=nearestNeighborOpen(distM,startIdx);
+        setStatus('2-opt refining...'); const t0=performance.now(); const {route, meters}=twoOptOpen(rough,distM,true); const t1=performance.now();
+        setStatus('Drawing markers...'); drawMarkers(COORDS_LATLON, LABELS, route);
+        setStatus('Drawing directions...'); await drawDirections(apiKey,profile,coordsLonLat,route);
+        const km=meters/1000.0; fillTable(route, LABELS, COORDS_LATLON); showStats(km, COORDS_LATLON.length, (t1-t0)/1000); setStatus('Done');
+      }catch(err){ console.error(err); setStatus('Error'); alert(err.message||String(err)); }
+    });
+  </script>
 </body>
 </html>
